@@ -11,8 +11,6 @@ using namespace MMFSoundPlayerLib;
 MMFSoundPlayer::MMFSoundPlayer()
 {
 	//Initialize variables
-	CurrentMediaSession = nullptr;
-	CurrentMediaSource = nullptr;
 	CurrentState = PlayerState::Closed;
 	CurrentFilePath = L"No File Loaded";
 	ReferenceCount = 1;
@@ -133,12 +131,6 @@ HRESULT MMFSoundPlayer::CloseMediaSessionAndSource()
 			CurrentMediaSession->Shutdown();
 		}
 	}
-	
-	//Release the media session
-	Helpers::SafeRelease(&CurrentMediaSession);
-
-	//Release the media source
-	Helpers::SafeRelease(&CurrentMediaSource);
 
 	//Change the state of the player to closed
 	CurrentState = PlayerState::Closed;
@@ -148,7 +140,7 @@ HRESULT MMFSoundPlayer::CloseMediaSessionAndSource()
 STDMETHODIMP MMFSoundPlayer::Invoke(IMFAsyncResult* pAsyncResult)
 {
 	//Dequeue an event from the event queue
-	IMFMediaEvent* event = nullptr;
+	CComPtr<IMFMediaEvent> event;
 	HRESULT hr = CurrentMediaSession->EndGetEvent(pAsyncResult, &event);
 	if (FAILED(hr))
 	{
@@ -184,8 +176,7 @@ STDMETHODIMP MMFSoundPlayer::Invoke(IMFAsyncResult* pAsyncResult)
 		break;
 	}
 
-	//Release the event and return a job well done 
-	Helpers::SafeRelease(&event);
+	//Return a success code
 	return S_OK;
 }
 STDMETHODIMP MMFSoundPlayer::GetParameters(DWORD* pdwFlags, DWORD* pdwQueue)
@@ -240,7 +231,7 @@ HRESULT MMFSoundPlayer::SetFileIntoPlayer(PCWSTR inputFilePath)
 	}
 
 	//Retrieve the Presentation Desciptor for the file's media source
-	IMFPresentationDescriptor* presentationDescriptor = nullptr;
+	CComPtr<IMFPresentationDescriptor> presentationDescriptor;
 	hr = CurrentMediaSource->CreatePresentationDescriptor(&presentationDescriptor);
 	if (FAILED(hr))
 	{
@@ -250,13 +241,12 @@ HRESULT MMFSoundPlayer::SetFileIntoPlayer(PCWSTR inputFilePath)
 	}
 
 	//Use presentation descriptor to create Playback Topology
-	IMFTopology* playbackTopology = nullptr;
+	CComPtr<IMFTopology> playbackTopology;
 	hr = CreatePlaybackTopology(presentationDescriptor, &playbackTopology);
 	if (FAILED(hr))
 	{
 		assert(false);
 		CurrentState = PlayerState::Closed;
-		Helpers::SafeRelease(&presentationDescriptor);
 		return hr;
 	}
 
@@ -266,15 +256,12 @@ HRESULT MMFSoundPlayer::SetFileIntoPlayer(PCWSTR inputFilePath)
 	{
 		assert(false);
 		CurrentState = PlayerState::Closed;
-		Helpers::SafeRelease(&presentationDescriptor);
 		return hr;
 	}
 	
 	//NOTE: SetTopology is asynchronous, so the state will not change and the player will not be ready until the MESessionTopologySet event is received and handled
 
-	//Release up temp objects and return the HRESULT codes
-	Helpers::SafeRelease(&presentationDescriptor);
-	Helpers::SafeRelease(&playbackTopology);
+	//Return final code
 	return hr;
 }
 
@@ -294,7 +281,6 @@ HRESULT MMFSoundPlayer::CreateMediaSession()
 	if (FAILED(hr))
 	{
 		assert(false);
-		Helpers::SafeRelease(&CurrentMediaSession);
 		return hr;
 	}
 
@@ -306,7 +292,7 @@ HRESULT MMFSoundPlayer::CreateMediaSession()
 HRESULT MMFSoundPlayer::CreateMediaSource(PCWSTR inputFilePath)
 {
 	//Create source resolver
-	IMFSourceResolver* sourceResolver = nullptr;
+	CComPtr<IMFSourceResolver> sourceResolver;
 	HRESULT hr = MFCreateSourceResolver(&sourceResolver);
 	if (FAILED(hr))
 	{
@@ -322,7 +308,7 @@ HRESULT MMFSoundPlayer::CreateMediaSource(PCWSTR inputFilePath)
 	The GUI can look at the "OpenPending" state and place a loading screen or something like that while
 	the media source is being created.
 	*/
-	IUnknown* source = nullptr;
+	CComPtr<IUnknown> source;
 	MF_OBJECT_TYPE objectType = MF_OBJECT_INVALID;
 	hr = sourceResolver->CreateObjectFromURL(
 		inputFilePath,             // URL of the source.
@@ -337,17 +323,14 @@ HRESULT MMFSoundPlayer::CreateMediaSource(PCWSTR inputFilePath)
 	if (FAILED(hr))
 	{
 		assert(false);
-		Helpers::SafeRelease(&sourceResolver);
 		return hr;
 	}
 
 	//Query and get the IMFMediaSource interface from the media source.
 	hr = source->QueryInterface(IID_PPV_ARGS(&CurrentMediaSource));
 	
-	//Release up all temporary variables and return the final HRESULT
+	//Return the final code
 	assert(SUCCEEDED(hr));
-	Helpers::SafeRelease(&source);
-	Helpers::SafeRelease(&sourceResolver);
 	return hr;
 }
 

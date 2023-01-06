@@ -2,6 +2,7 @@
 
 #include <mfidl.h>
 #include <string>
+#include <atlbase.h>
 
 namespace MMFSoundPlayerLib
 {
@@ -20,8 +21,8 @@ namespace MMFSoundPlayerLib
 	{
 	private:
 		//Datafields
-		IMFMediaSession* CurrentMediaSession;
-		IMFMediaSource* CurrentMediaSource;
+		CComPtr<IMFMediaSession> CurrentMediaSession;
+		CComPtr<IMFMediaSource> CurrentMediaSource;
 		PlayerState CurrentState;
 		std::wstring CurrentFilePath;
 		
