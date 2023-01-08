@@ -40,7 +40,9 @@ namespace MMFSoundPlayerLib
 		HRESULT CreateMediaSession();
 		HRESULT CreateMediaSource(PCWSTR inputFilePath);
 		HRESULT CreatePlaybackTopology(IMFPresentationDescriptor* inputPresentationDescriptor, IMFTopology** outputTopology);
-
+		HRESULT AddSourceNode(IMFTopology* inputTopology, IMFPresentationDescriptor* inputPresentationDescriptor, IMFStreamDescriptor* inputStreamDescriptor, IMFTopologyNode** sourceNode);
+		HRESULT AddOutputNode(IMFTopology* inputTopology, IMFActivate* inputMediaSinkActivationObject, IMFTopologyNode** outputNode);
+		
 		//Destruction functions
 		HRESULT CloseMediaSessionAndSource();
 		
@@ -62,8 +64,10 @@ namespace MMFSoundPlayerLib
 
 		//Audio Control
 		HRESULT SetFileIntoPlayer(PCWSTR inputFilepath);
-		HRESULT TogglePlayPause();
+		HRESULT Play();
+		HRESULT Pause();
 		HRESULT Stop(); 
+		HRESULT Seek();
 
 		//Getters
 		PlayerState GetPlayerState();

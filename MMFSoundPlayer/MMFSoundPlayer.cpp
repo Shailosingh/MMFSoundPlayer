@@ -61,6 +61,16 @@ HRESULT MMFSoundPlayer::Initialize()
 			hr = HRESULT_FROM_WIN32(GetLastError());
 		}
 	}
+	
+	//Startup the media session
+	hr = CreateMediaSession();
+	if (FAILED(hr))
+	{
+		assert(false);
+		CurrentState = PlayerState::Closed;
+		return hr;
+	}
+	
 	return hr;
 }
 
@@ -148,6 +158,24 @@ STDMETHODIMP MMFSoundPlayer::Invoke(IMFAsyncResult* pAsyncResult)
 		return hr;
 	}
 
+	//Ensure the operation that triggered the event was not a total failure
+	HRESULT operationStatus = S_OK;
+	hr = event->GetStatus(&operationStatus);
+
+	//If getting the status itself failed, return that failure code
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//If getting the status was successful but, the operation failed, return that operation failure code
+	if (FAILED(operationStatus))
+	{
+		assert(false);
+		return operationStatus;
+	}
+
 	//Get the event type so it can be handled
 	MediaEventType eventType = MEUnknown;
 	hr = event->GetType(&eventType);
@@ -163,6 +191,17 @@ STDMETHODIMP MMFSoundPlayer::Invoke(IMFAsyncResult* pAsyncResult)
 	case MESessionClosed:
 		//Signal that the session is closed
 		SetEvent(ExitEvent);
+		break;
+
+	case MESessionTopologySet:
+		//Signal that the topology is set (thus player is stopped and ready to play), then start the music
+		CurrentState = PlayerState::Stopped;
+		hr = Play();
+		if (FAILED(hr))
+		{
+			assert(false);
+			return hr;
+		}
 		break;
 
 	default:
@@ -203,26 +242,14 @@ STDMETHODIMP_(ULONG) MMFSoundPlayer::AddRef()
 //Public Functions---------------------------------------------------------------------------------------------------------------------------------------------
 HRESULT MMFSoundPlayer::SetFileIntoPlayer(PCWSTR inputFilePath)
 {
-	//Close up any current instances of the media session and source
-	HRESULT hr = CloseMediaSessionAndSource();
-	if (FAILED(hr))
-	{
-		assert(false);
-		return hr;
-	}
+	//TODO: Stop the session and wait for the event to ensure it is stopped before continuing
+
+	//TODO: Destroy the current media source if it exists to make room for a new one for the new file
+	
 	CurrentState = PlayerState::OpenPending;
 
-	//Startup new media session
-	hr = CreateMediaSession();
-	if (FAILED(hr))
-	{
-		assert(false);
-		CurrentState = PlayerState::Closed;
-		return hr;
-	}
-
 	//Create new media source with new input file
-	hr = CreateMediaSource(inputFilePath);
+	HRESULT hr = CreateMediaSource(inputFilePath);
 	if (FAILED(hr))
 	{
 		assert(false);
@@ -250,8 +277,8 @@ HRESULT MMFSoundPlayer::SetFileIntoPlayer(PCWSTR inputFilePath)
 		return hr;
 	}
 
-	//Set the playback topology into the media session
-	hr = CurrentMediaSession->SetTopology(0, playbackTopology);
+	//Set the playback topology into the media session and set flag so that the old presentation is immediately stopped and cleared before setting new topology
+	hr = CurrentMediaSession->SetTopology(MFSESSION_SETTOPOLOGY_IMMEDIATE, playbackTopology);
 	if (FAILED(hr))
 	{
 		assert(false);
@@ -259,7 +286,31 @@ HRESULT MMFSoundPlayer::SetFileIntoPlayer(PCWSTR inputFilePath)
 		return hr;
 	}
 	
-	//NOTE: SetTopology is asynchronous, so the state will not change and the player will not be ready until the MESessionTopologySet event is received and handled
+	//NOTE: SetTopology is asynchronous, so the state will not change and the player will not start playing until the MESessionTopologySet event is received and handled
+
+	//Return final code
+	return hr;
+}
+
+HRESULT MMFSoundPlayer::Play()
+{
+	//Ensure the player is either paused or stopped
+	if (!(CurrentState == PlayerState::Paused || CurrentState == PlayerState::Stopped))
+	{
+		assert(false);
+		return E_NOT_VALID_STATE;
+	}
+
+	//Start the session
+	HRESULT hr = CurrentMediaSession->Start(&GUID_NULL, nullptr);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Change the state of the player to indicate the music has started
+	CurrentState = PlayerState::Started;
 
 	//Return final code
 	return hr;
@@ -336,5 +387,189 @@ HRESULT MMFSoundPlayer::CreateMediaSource(PCWSTR inputFilePath)
 
 HRESULT MMFSoundPlayer::CreatePlaybackTopology(IMFPresentationDescriptor* inputPresentationDescriptor, IMFTopology** outputTopology)
 {
-	//TODO
+	//Create an empty topology
+	CComPtr<IMFTopology> newTopology;
+	HRESULT hr = MFCreateTopology(&newTopology);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+	
+	//Ensure that there is only one stream in the file. If there is more than one stream, then the file is not supported at this time.
+	DWORD streamCount = 0;
+	hr = inputPresentationDescriptor->GetStreamDescriptorCount(&streamCount);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+	
+	//Check if the single stream is audio by getting the stream descriptor
+	CComPtr<IMFStreamDescriptor> streamDescriptor;
+	BOOL selected = FALSE;
+	hr = inputPresentationDescriptor->GetStreamDescriptorByIndex(0, &selected, &streamDescriptor);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+	
+	//Ensure that the stream is selected. If it isn't there are serious issues with playing the file.
+	if (!selected)
+	{
+		assert(false);
+		return E_FAIL;
+	}
+
+	//Check the media type by getting the media type handler and checking its major type. If it is non-audio, it is not supported
+	CComPtr<IMFMediaTypeHandler> mediaTypeHandler;
+	hr = streamDescriptor->GetMediaTypeHandler(&mediaTypeHandler);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+	
+	GUID majorType;
+	hr = mediaTypeHandler->GetMajorType(&majorType);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	if (majorType != MFMediaType_Audio)
+	{
+		assert(false);
+		return E_FAIL;
+	}
+
+	//Create media sink for SAR (Streaming Audio Renderer)
+	CComPtr<IMFActivate> mediaSinkActivationObject;
+	hr = MFCreateAudioRendererActivate(&mediaSinkActivationObject);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Add Source Node to the topology
+	CComPtr<IMFTopologyNode> sourceNode;
+	hr = AddSourceNode(newTopology, inputPresentationDescriptor, streamDescriptor, &sourceNode);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Add Output Node to the topology
+	CComPtr<IMFTopologyNode> outputNode;
+	hr = AddOutputNode(newTopology, mediaSinkActivationObject, &outputNode);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Connect the source node to the output node
+	hr = sourceNode->ConnectOutput(0, outputNode, 0);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Give the caller the pointer to newTopology through the output parameter
+	*outputTopology = newTopology;
+	
+	//Return the final code
+	return hr;
+}
+
+
+HRESULT MMFSoundPlayer::AddSourceNode(IMFTopology* inputTopology, IMFPresentationDescriptor* inputPresentationDescriptor, IMFStreamDescriptor* inputStreamDescriptor, IMFTopologyNode** sourceNode)
+{
+	//Create the input node
+	CComPtr<IMFTopologyNode> newNode;
+	HRESULT hr = MFCreateTopologyNode(MF_TOPOLOGY_SOURCESTREAM_NODE, &newNode);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Load the media source, presentation descriptor, and stream descriptor into the node for the topology
+	hr = newNode->SetUnknown(MF_TOPONODE_SOURCE, CurrentMediaSource);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+	
+	hr = newNode->SetUnknown(MF_TOPONODE_PRESENTATION_DESCRIPTOR, inputPresentationDescriptor);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+	
+	hr = newNode->SetUnknown(MF_TOPONODE_STREAM_DESCRIPTOR, inputStreamDescriptor);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Finally add the node to the topology
+	hr = inputTopology->AddNode(newNode);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Return the newNode pointer to caller through outputNode and return the final code
+	*sourceNode = newNode;
+	return hr;
+}
+
+HRESULT MMFSoundPlayer::AddOutputNode(IMFTopology* inputTopology, IMFActivate* inputMediaSinkActivationObject, IMFTopologyNode** outputNode)
+{
+	//Create the output node
+	CComPtr<IMFTopologyNode> newNode;
+	HRESULT hr = MFCreateTopologyNode(MF_TOPOLOGY_OUTPUT_NODE, &newNode);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Bind the media sink activation object to the output node
+	hr = newNode->SetObject(inputMediaSinkActivationObject);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Ensure that the node is shut down when the topology is swapped out
+	hr = newNode->SetUINT32(MF_TOPONODE_NOSHUTDOWN_ON_REMOVE, FALSE);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+	
+	//Finally add the node to the topology
+	hr = inputTopology->AddNode(newNode);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Return the newNode pointer to caller through outputNode and return the final code
+	*outputNode = newNode;
+	return hr;
 }
