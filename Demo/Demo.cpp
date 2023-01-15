@@ -26,7 +26,7 @@ int main()
 	}
 
 	//Play music file
-	std::wstring musicFilepath = L"C:\\Users\\compu\\Music\\SNSD\\Gee.mp3";
+	std::wstring musicFilepath = L"C:\\Users\\compu\\Music\\SNSD\\Gee.wav";
 	hr = player->SetFileIntoPlayer(musicFilepath.c_str());
 	if (FAILED(hr))
 	{
