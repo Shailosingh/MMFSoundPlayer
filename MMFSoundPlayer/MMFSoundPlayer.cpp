@@ -1,5 +1,4 @@
 #include "MMFSoundPlayer.h"
-#include "Helpers.h"
 #include <mfapi.h>
 #include <stdexcept>
 #include <cassert>
@@ -13,6 +12,7 @@ MMFSoundPlayer::MMFSoundPlayer()
 	//Initialize variables
 	CurrentState = PlayerState::Closed;
 	CurrentFilePath = L"No File Loaded";
+	CurrentAudioFileDuration_100NanoSecondUnits = 0;
 	ReferenceCount = 1;
 }
 
@@ -33,18 +33,18 @@ HRESULT MMFSoundPlayer::CreateInstance(MMFSoundPlayer** outputMMFSoundPlayer)
 
 	//Initialize the object
 	HRESULT hr = newPlayer->Initialize();
-	if (SUCCEEDED(hr))
-	{
-		//If initialization was successful, give the caller the object
-		*outputMMFSoundPlayer = newPlayer;
-	}
-	else
+	if (FAILED(hr))
 	{
 		//If initialization failed, release the object
+		assert(false);
 		newPlayer->Release();
+		return hr;
 	}
 
-	//Return final code
+	//If initialization was successful, give the caller the object
+	*outputMMFSoundPlayer = newPlayer;
+
+	//Return final success code
 	return hr;
 }
 
@@ -52,23 +52,46 @@ HRESULT MMFSoundPlayer::Initialize()
 {
 	//Start up the MMF library
 	HRESULT hr = MFStartup(MF_VERSION);
-	if (SUCCEEDED(hr))
-	{
-		//Setup the exit event handle
-		ExitEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-		if (ExitEvent == nullptr)
-		{
-			hr = HRESULT_FROM_WIN32(GetLastError());
-		}
-	}
-	
-	//Startup the media session
-	hr = CreateMediaSession();
 	if (FAILED(hr))
 	{
 		assert(false);
-		CurrentState = PlayerState::Closed;
 		return hr;
+	}
+	
+	//Setup event handles
+	ExitEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+	if (ExitEvent == nullptr)
+	{
+		assert(false);
+		return HRESULT_FROM_WIN32(GetLastError());
+	}
+
+	PlayEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+	if (PlayEvent == nullptr)
+	{
+		assert(false);
+		return HRESULT_FROM_WIN32(GetLastError());
+	}
+	
+	PauseEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+	if (PauseEvent == nullptr)
+	{
+		assert(false);
+		return HRESULT_FROM_WIN32(GetLastError());
+	}
+	
+	StopEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+	if (StopEvent == nullptr)
+	{
+		assert(false);
+		return HRESULT_FROM_WIN32(GetLastError());
+	}
+
+	TopologySetEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+	if (TopologySetEvent == nullptr)
+	{
+		assert(false);
+		return HRESULT_FROM_WIN32(GetLastError());
 	}
 	
 	return hr;
@@ -76,18 +99,89 @@ HRESULT MMFSoundPlayer::Initialize()
 
 MMFSoundPlayer::~MMFSoundPlayer()
 {
-	CloseMediaSessionAndSource();
+	//If CreateInstance isn't called and yet, it should
+	Shutdown();
+}
+
+HRESULT MMFSoundPlayer::Shutdown()
+{
+	HRESULT hr = CloseMediaSessionAndSource();
 
 	//Shut down the MMF library
-	MFShutdown();
+	hr = MFShutdown();
 
-	//Throw away the event object
+	//Throw away the event objects
 	if (ExitEvent != nullptr)
 	{
 		CloseHandle(ExitEvent);
+		ExitEvent = nullptr;
 	}
+	if (PlayEvent != nullptr)
+	{
+		CloseHandle(PlayEvent);
+		PlayEvent = nullptr;
+	}
+	if (PauseEvent != nullptr)
+	{
+		CloseHandle(PauseEvent);
+		PauseEvent = nullptr;
+	}
+	if (StopEvent != nullptr)
+	{
+		CloseHandle(StopEvent);
+		StopEvent = nullptr;
+	}
+	if (TopologySetEvent != nullptr)
+	{
+		CloseHandle(TopologySetEvent);
+		TopologySetEvent = nullptr;
+	}
+
+	//Return final code
+	return hr;
 }
 
+HRESULT MMFSoundPlayer::CloseMediaSessionAndSource()
+{
+	//Signal that session is closing up
+	CurrentState = PlayerState::Closing;
+	
+	//Close media session
+	if (CurrentMediaSession != nullptr)
+	{
+		CurrentMediaSession->Close();
+		
+		//Waits on MESessionClose event, so I know the Media Session is fully closed. Timeout after 10 seconds. (This verifies if there is an error)
+		DWORD result = WaitForSingleObject(ExitEvent, 10000);
+		if (result == WAIT_TIMEOUT)
+		{
+			//THIS CAN NEVER HAPPEN, NO MATTER WHAT! (This means the Exit was never completed and this is catastrophic. NO RECOURSE)
+			assert(false);
+		}
+	}
+
+	//Shutdown the media session and source
+	if (CurrentMediaSource != nullptr)
+	{
+		CurrentMediaSource->Shutdown();
+	}
+	if (CurrentMediaSession != nullptr)
+	{
+		CurrentMediaSession->Shutdown();
+	}
+
+	//Null the session and source for further use
+	CurrentMediaSource = nullptr;
+	CurrentMediaSession = nullptr;
+
+	//Change the state of the player to closed
+	CurrentState = PlayerState::Closed;
+
+	//Return final success code
+	return S_OK;
+}
+
+//IUnknown and IMFAsyncCallback Implementation Functions-------------------------------------------------------------------------------------------------------
 STDMETHODIMP_(ULONG) MMFSoundPlayer::Release()
 {
 	//Decrement the reference count
@@ -103,50 +197,27 @@ STDMETHODIMP_(ULONG) MMFSoundPlayer::Release()
 	return newCount;
 }
 
-HRESULT MMFSoundPlayer::CloseMediaSessionAndSource()
+STDMETHODIMP MMFSoundPlayer::GetParameters(DWORD* pdwFlags, DWORD* pdwQueue)
 {
-	//Initialize variables
-	HRESULT hr = S_OK;
-	
-	//Signal that session is closing up
-	CurrentState = PlayerState::Closing;
-	
-	//Close media session (asynchronously)
-	if (CurrentMediaSession != nullptr)
-	{
-		hr = CurrentMediaSession->Close();
-		
-		//Waits on MESessionClose event, so I know the Media Session is fully closed. Timeout after 10 seconds
-		if (SUCCEEDED(hr))
-		{
-			DWORD result = WaitForSingleObject(ExitEvent, 10000);
-			if (result == WAIT_TIMEOUT)
-			{
-				//THIS CAN NEVER HAPPEN, NO MATTER WHAT! (This means the Exit was never completed and this is catastrophic. NO RECOURSE)
-				assert(false);
-			}
-		}
-	}
-
-	//Shutdown the media session and source
-	if (SUCCEEDED(hr))
-	{
-		if (CurrentMediaSource != nullptr)
-		{
-			CurrentMediaSource->Shutdown();
-		}
-
-		if (CurrentMediaSession != nullptr)
-		{
-			CurrentMediaSession->Shutdown();
-		}
-	}
-
-	//Change the state of the player to closed
-	CurrentState = PlayerState::Closed;
+	return E_NOTIMPL;
 }
 
-//IUnknown and IMFAsyncCallback Implementation Functions-------------------------------------------------------------------------------------------------------
+STDMETHODIMP MMFSoundPlayer::QueryInterface(REFIID iid, void** ppv)
+{
+	static const QITAB qit[] =
+	{
+		QITABENT(MMFSoundPlayer, IMFAsyncCallback),
+		{ 0 }
+	};
+	return QISearch(this, qit, iid, ppv);
+}
+
+STDMETHODIMP_(ULONG) MMFSoundPlayer::AddRef()
+{
+	//Atomic Increment
+	return InterlockedIncrement(&ReferenceCount);
+}
+
 STDMETHODIMP MMFSoundPlayer::Invoke(IMFAsyncResult* pAsyncResult)
 {
 	//Dequeue an event from the event queue
@@ -184,72 +255,91 @@ STDMETHODIMP MMFSoundPlayer::Invoke(IMFAsyncResult* pAsyncResult)
 		assert(false);
 		return hr;
 	}
-	
+
 	//Handle the event
 	switch (eventType)
 	{
 	case MESessionClosed:
+		OutputDebugStringA("HANDLED EVENT: MESessionClosed\n");
 		//Signal that the session is closed
 		SetEvent(ExitEvent);
 		break;
 
 	case MESessionTopologySet:
-		//Signal that the topology is set (thus player is stopped and ready to play), then start the music
+		OutputDebugStringA("HANDLED EVENT: MESessionTopologySet\n");
+		//Change the state of the player to show that it is stopped
 		CurrentState = PlayerState::Stopped;
-		hr = Play();
-		if (FAILED(hr))
-		{
-			assert(false);
-			return hr;
-		}
+
+		//Signal that the topology is set
+		SetEvent(TopologySetEvent);
+		break;
+
+	case MESessionStarted:
+		OutputDebugStringA("HANDLED EVENT: MESessionStarted\n");
+		//Change the state of the player to indicate the music has started playing
+		CurrentState = PlayerState::Playing;
+
+		//Signal that the player has started playing
+		SetEvent(PlayEvent);
+		break;
+
+	case MESessionPaused:
+		OutputDebugStringA("HANDLED EVENT: MESessionPaused\n");
+		//Change the state of the player to indicate the music has paused
+		CurrentState = PlayerState::Paused;
+
+		//Signal that the player has paused
+		SetEvent(PauseEvent);
+		break;
+
+	case MESessionStopped:
+		OutputDebugStringA("HANDLED EVENT: MESessionStopped\n");
+		//Change the state of the player to indicate the music has stopped
+		CurrentState = PlayerState::Stopped;
+
+		//Signal that the player has stopped
+		SetEvent(StopEvent);
+		break;
+
+	case MEEndOfPresentation:
+		OutputDebugStringA("HANDLED EVENT: MEEndOfPresentation\n");
+		//Change the state of the player to indicate that the player is ready for a new song to be loaded
+		CurrentState = PlayerState::Ready;
 		break;
 
 	default:
-		//Handle the next event
+		OutputDebugStringA("HANDLED EVENT: Unknown Event\n");
+		break;
+	}
+
+	//Handle the next event if the session is not being closed (MESessionClosed is the final event)
+	if (eventType != MESessionClosed)
+	{
 		hr = CurrentMediaSession->BeginGetEvent(this, nullptr);
 		if (FAILED(hr))
 		{
 			assert(false);
 			return hr;
 		}
-		break;
 	}
 
 	//Return a success code
 	return S_OK;
 }
-STDMETHODIMP MMFSoundPlayer::GetParameters(DWORD* pdwFlags, DWORD* pdwQueue)
-{
-	return E_NOTIMPL;
-}
-
-STDMETHODIMP MMFSoundPlayer::QueryInterface(REFIID iid, void** ppv)
-{
-	static const QITAB qit[] =
-	{
-		QITABENT(MMFSoundPlayer, IMFAsyncCallback),
-		{ 0 }
-	};
-	return QISearch(this, qit, iid, ppv);
-}
-
-STDMETHODIMP_(ULONG) MMFSoundPlayer::AddRef()
-{
-	//Atomic Increment
-	return InterlockedIncrement(&ReferenceCount);
-}
 
 //Public Functions---------------------------------------------------------------------------------------------------------------------------------------------
 HRESULT MMFSoundPlayer::SetFileIntoPlayer(PCWSTR inputFilePath)
 {
-	//TODO: Stop the session and wait for the event to ensure it is stopped before continuing
-
-	//TODO: Destroy the current media source if it exists to make room for a new one for the new file
+	//Close up any existing sessions and source
+	HRESULT hr = CloseMediaSessionAndSource();
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
 	
-	CurrentState = PlayerState::OpenPending;
-
-	//Create new media source with new input file
-	HRESULT hr = CreateMediaSource(inputFilePath);
+	//Startup the media session
+	hr = CreateMediaSession();
 	if (FAILED(hr))
 	{
 		assert(false);
@@ -257,13 +347,39 @@ HRESULT MMFSoundPlayer::SetFileIntoPlayer(PCWSTR inputFilePath)
 		return hr;
 	}
 
-	//Retrieve the Presentation Desciptor for the file's media source
+	//Reset song info
+	CurrentFilePath = L"No File Loaded";
+	CurrentAudioFileDuration_100NanoSecondUnits = 0;
+
+	//Begin opening the file
+	CurrentState = PlayerState::OpenPending;
+
+	//Create new media source with new input file
+	hr = CreateMediaSource(inputFilePath);
+	if (FAILED(hr))
+	{
+		assert(false);
+		CurrentState = PlayerState::Ready;
+		return hr;
+	}
+
+	//Retrieve the Presentation Descriptor for the file's media source
 	CComPtr<IMFPresentationDescriptor> presentationDescriptor;
 	hr = CurrentMediaSource->CreatePresentationDescriptor(&presentationDescriptor);
 	if (FAILED(hr))
 	{
 		assert(false);
-		CurrentState = PlayerState::Closed;
+		CurrentState = PlayerState::Ready;
+		return hr;
+	}
+
+	//Use the presentation descriptor to get the file's audio duration
+	UINT64 tempCurrentAudioFileDuration = 0;
+	hr = presentationDescriptor->GetUINT64(MF_PD_DURATION, &tempCurrentAudioFileDuration);
+	if (FAILED(hr))
+	{
+		assert(false);
+		CurrentState = PlayerState::Ready;
 		return hr;
 	}
 
@@ -273,7 +389,7 @@ HRESULT MMFSoundPlayer::SetFileIntoPlayer(PCWSTR inputFilePath)
 	if (FAILED(hr))
 	{
 		assert(false);
-		CurrentState = PlayerState::Closed;
+		CurrentState = PlayerState::Ready;
 		return hr;
 	}
 
@@ -282,11 +398,30 @@ HRESULT MMFSoundPlayer::SetFileIntoPlayer(PCWSTR inputFilePath)
 	if (FAILED(hr))
 	{
 		assert(false);
-		CurrentState = PlayerState::Closed;
+		CurrentState = PlayerState::Ready;
 		return hr;
 	}
 	
-	//NOTE: SetTopology is asynchronous, so the state will not change and the player will not start playing until the MESessionTopologySet event is received and handled
+	//Wait at most 3 seconds for the topology to be set
+	DWORD waitResult = WaitForSingleObject(TopologySetEvent, 3000);
+	if (waitResult == WAIT_TIMEOUT)
+	{
+		assert(false);
+		CurrentState = PlayerState::Ready;
+		return E_FAIL;
+	}
+
+	//Play the sound and wait at most three seconds for it to do so
+	hr = Play();
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Setup the current file path and audio file duration
+	CurrentFilePath = inputFilePath;
+	CurrentAudioFileDuration_100NanoSecondUnits = tempCurrentAudioFileDuration;
 
 	//Return final code
 	return hr;
@@ -294,23 +429,136 @@ HRESULT MMFSoundPlayer::SetFileIntoPlayer(PCWSTR inputFilePath)
 
 HRESULT MMFSoundPlayer::Play()
 {
-	//Ensure the player is either paused or stopped
+	//Ensure the player is either paused or stopped. If not, ignore this call
 	if (!(CurrentState == PlayerState::Paused || CurrentState == PlayerState::Stopped))
 	{
-		assert(false);
-		return E_NOT_VALID_STATE;
+		return S_OK;
 	}
 
+	//Set the audio to start playing at the current time (if stopped, will start audio track from beginning)
+	PROPVARIANT varStart;
+	PropVariantInit(&varStart);
+
 	//Start the session
-	HRESULT hr = CurrentMediaSession->Start(&GUID_NULL, nullptr);
+	HRESULT hr = CurrentMediaSession->Start(&GUID_NULL, &varStart);
 	if (FAILED(hr))
 	{
 		assert(false);
 		return hr;
 	}
 
-	//Change the state of the player to indicate the music has started
-	CurrentState = PlayerState::Started;
+	//Wait at most 3 seconds for song to start playing
+	DWORD waitResult = WaitForSingleObject(PlayEvent, 3000);
+	if (waitResult == WAIT_TIMEOUT)
+	{
+		assert(false);
+		return E_FAIL;
+	}
+
+	//Return final code
+	return hr;
+}
+
+HRESULT MMFSoundPlayer::Pause()
+{
+	//Ensure the player is currently playing. If not, ignore this call
+	if (!(CurrentState == PlayerState::Playing))
+	{
+		return S_OK;
+	}
+
+	//Pause the session
+	HRESULT hr = CurrentMediaSession->Pause();
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Wait at most 3 seconds for song to pause
+	DWORD waitResult = WaitForSingleObject(PauseEvent, 3000);
+	if (waitResult == WAIT_TIMEOUT)
+	{
+		assert(false);
+		return E_FAIL;
+	}
+	
+	//Return final code
+	return hr;
+}
+
+HRESULT MMFSoundPlayer::Stop()
+{
+	//Ensure the player is either paused or playing. If not, ignore this call
+	if (!(CurrentState == PlayerState::Paused || CurrentState == PlayerState::Playing))
+	{
+		return S_OK;
+	}
+
+	//Stop the session
+	HRESULT hr = CurrentMediaSession->Stop();
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Wait at most 3 seconds for song to stop
+	DWORD waitResult = WaitForSingleObject(StopEvent, 3000);
+	if (waitResult == WAIT_TIMEOUT)
+	{
+		assert(false);
+		return E_FAIL;
+	}
+
+	//Return final code
+	return hr;
+}
+
+HRESULT MMFSoundPlayer::Seek(UINT64 seekPosition_100NanoSecondUnits)
+{
+	//Ensure the player is either paused or playing. If not, ignore this call
+	if (!(CurrentState == PlayerState::Paused || CurrentState == PlayerState::Playing))
+	{
+		return S_OK;
+	}
+
+	//Ensure the seek position is within the bounds of the file
+	if (!(seekPosition_100NanoSecondUnits <= CurrentAudioFileDuration_100NanoSecondUnits))
+	{
+		assert(false);
+		return E_INVALIDARG;
+	}
+
+	//Pause the session
+	HRESULT hr = Pause();
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Set the start time to the beginning of the file
+	PROPVARIANT varStart;
+	PropVariantInit(&varStart);
+	varStart.vt = VT_I8;
+	varStart.hVal.QuadPart = seekPosition_100NanoSecondUnits;
+
+	//Start the session
+	hr = CurrentMediaSession->Start(&GUID_NULL, &varStart);
+	if (FAILED(hr))
+	{
+		assert(false);
+		return hr;
+	}
+
+	//Wait at most 3 seconds for song to start playing again
+	DWORD waitResult = WaitForSingleObject(PlayEvent, 3000);
+	if (waitResult == WAIT_TIMEOUT)
+	{
+		assert(false);
+		return E_FAIL;
+	}
 
 	//Return final code
 	return hr;
@@ -404,6 +652,11 @@ HRESULT MMFSoundPlayer::CreatePlaybackTopology(IMFPresentationDescriptor* inputP
 		assert(false);
 		return hr;
 	}
+	if (streamCount != 1)
+	{
+		assert(false);
+		return E_INVALIDARG;
+	}
 	
 	//Check if the single stream is audio by getting the stream descriptor
 	CComPtr<IMFStreamDescriptor> streamDescriptor;
@@ -442,7 +695,7 @@ HRESULT MMFSoundPlayer::CreatePlaybackTopology(IMFPresentationDescriptor* inputP
 	if (majorType != MFMediaType_Audio)
 	{
 		assert(false);
-		return E_FAIL;
+		return E_INVALIDARG;
 	}
 
 	//Create media sink for SAR (Streaming Audio Renderer)
@@ -481,7 +734,7 @@ HRESULT MMFSoundPlayer::CreatePlaybackTopology(IMFPresentationDescriptor* inputP
 	}
 
 	//Give the caller the pointer to newTopology through the output parameter
-	*outputTopology = newTopology;
+	*outputTopology = newTopology.Detach();
 	
 	//Return the final code
 	return hr;
@@ -530,7 +783,7 @@ HRESULT MMFSoundPlayer::AddSourceNode(IMFTopology* inputTopology, IMFPresentatio
 	}
 
 	//Return the newNode pointer to caller through outputNode and return the final code
-	*sourceNode = newNode;
+	*sourceNode = newNode.Detach();
 	return hr;
 }
 
@@ -570,6 +823,56 @@ HRESULT MMFSoundPlayer::AddOutputNode(IMFTopology* inputTopology, IMFActivate* i
 	}
 
 	//Return the newNode pointer to caller through outputNode and return the final code
-	*outputNode = newNode;
+	*outputNode = newNode.Detach();
 	return hr;
+}
+
+//Getters------------------------------------------------------------------------------------------------------------------------------------------------------
+PlayerState MMFSoundPlayer::GetPlayerState()
+{
+	return CurrentState;
+}
+
+std::wstring MMFSoundPlayer::GetAudioFilepath()
+{
+	return CurrentFilePath;
+}
+
+UINT64 MMFSoundPlayer::GetAudioFileDuration_100NanoSecondUnits()
+{
+	return CurrentAudioFileDuration_100NanoSecondUnits;
+}
+
+UINT64 MMFSoundPlayer::GetCurrentPresentationTime_100NanoSecondUnits()
+{
+	//If the session is nulled, return 0
+	if (CurrentMediaSession == nullptr)
+	{
+		return 0;
+	}
+
+	//Get the media session's clock and if it is unavailable, return 0
+	CComPtr<IMFClock> mediaSessionClock;
+	HRESULT hr = CurrentMediaSession->GetClock(&mediaSessionClock);
+	if (FAILED(hr))
+	{
+		return 0;
+	}
+
+	//Query the media session clock for a presentation clock and if there is an error, return 0
+	CComPtr<IMFPresentationClock> presentationClock;
+	hr = mediaSessionClock->QueryInterface(IID_PPV_ARGS(&presentationClock));
+	if (FAILED(hr))
+	{
+		return 0;
+	}
+
+	//Return the current time of the presentation. Return 0 if there is an error
+	MFTIME currentPresentationTime = 0;
+	hr = presentationClock->GetTime(&currentPresentationTime);
+	if (FAILED(hr))
+	{
+		return 0;
+	}
+	return currentPresentationTime;
 }
