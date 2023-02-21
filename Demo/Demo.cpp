@@ -26,7 +26,7 @@ int main()
 	}
 
 	//Play music file
-	std::wstring musicFilepath = L"C:\\Users\\compu\\Music\\SNSD\\Gee.wav";
+	std::wstring musicFilepath = L"C:\\Users\\compu\\Documents\\MMFSoundPlayer Test\\Gee.wav";
 	hr = player->SetFileIntoPlayer(musicFilepath.c_str());
 	if (FAILED(hr))
 	{
@@ -111,7 +111,7 @@ int main()
 	std::cout << "Current Timestamp: " << Convert100NanoSecondsToTimestamp(player->GetCurrentPresentationTime_100NanoSecondUnits()) << "\n\n";
 
 	//Play new song (Oh!) from scratch for 10 seconds
-	musicFilepath = L"C:\\Users\\compu\\Music\\SNSD\\Oh!.mp3";
+	musicFilepath = L"C:\\Users\\compu\\Documents\\MMFSoundPlayer Test\\Oh!.mp3";
 	hr = player->SetFileIntoPlayer(musicFilepath.c_str());
 	if (FAILED(hr))
 	{
