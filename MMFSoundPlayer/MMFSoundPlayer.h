@@ -10,6 +10,7 @@ namespace MMFSoundPlayerLib
 	{
 		Closed,         // No session.
 		Ready,          // Session was created, ready to open a file. 
+		PresentationEnd,// Song just ended and if songs are in a queue, it is ready for the next song
 		OpenPending,    // Session is opening a file.
 		Playing,        // Session is playing a file.
 		Paused,         // Session is paused.
@@ -42,7 +43,7 @@ namespace MMFSoundPlayerLib
 		//Acts as constructor, called by CreateInstance
 		HRESULT Initialize();
 
-		//Private Constructor (public should call CreateInstance) and Destructor (public should call release)
+		//Private Constructor (public should call CreateInstance) and Destructor (public should call Shutdown)
 		MMFSoundPlayer();
 		~MMFSoundPlayer();
 

@@ -303,8 +303,8 @@ STDMETHODIMP MMFSoundPlayer::Invoke(IMFAsyncResult* pAsyncResult)
 
 	case MEEndOfPresentation:
 		OutputDebugStringA("HANDLED EVENT: MEEndOfPresentation\n");
-		//Change the state of the player to indicate that the player is ready for a new song to be loaded
-		CurrentState = PlayerState::Ready;
+		//Change the state of the player to indicate that the old song finished and that the new song is ready for loading if available
+		CurrentState = PlayerState::PresentationEnd;
 		break;
 
 	default:
