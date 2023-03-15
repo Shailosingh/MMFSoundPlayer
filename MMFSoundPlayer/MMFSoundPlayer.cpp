@@ -538,7 +538,7 @@ HRESULT MMFSoundPlayer::Seek(UINT64 seekPosition_100NanoSecondUnits)
 		return hr;
 	}
 
-	//Set the start time to the beginning of the file
+	//Set the start time to the seek position
 	PROPVARIANT varStart;
 	PropVariantInit(&varStart);
 	varStart.vt = VT_I8;
