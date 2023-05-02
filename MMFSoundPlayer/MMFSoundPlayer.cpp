@@ -93,6 +93,13 @@ HRESULT MMFSoundPlayer::Initialize()
 		assert(false);
 		return HRESULT_FROM_WIN32(GetLastError());
 	}
+
+	VolumeExternallyChanged = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+	if (VolumeExternallyChanged == nullptr)
+	{
+		assert(false);
+		return HRESULT_FROM_WIN32(GetLastError());
+	}
 	
 	return hr;
 }
@@ -135,6 +142,11 @@ HRESULT MMFSoundPlayer::Shutdown()
 	{
 		CloseHandle(TopologySetEvent);
 		TopologySetEvent = nullptr;
+	}
+	if (VolumeExternallyChanged != nullptr)
+	{
+		CloseHandle(VolumeExternallyChanged);
+		VolumeExternallyChanged = nullptr;
 	}
 
 	//Return final code
@@ -305,6 +317,13 @@ STDMETHODIMP MMFSoundPlayer::Invoke(IMFAsyncResult* pAsyncResult)
 		OutputDebugStringA("HANDLED EVENT: MEEndOfPresentation\n");
 		//Change the state of the player to indicate that the old song finished and that the new song is ready for loading if available
 		CurrentState = PlayerState::PresentationEnd;
+		break;
+
+	case MEAudioSessionVolumeChanged:
+		OutputDebugStringA("HANDLED EVENT: MEAudioSessionVolumeChanged\n");
+
+		//Signal that the volume has changed from an external source (like the volume mixer)
+		SetEvent(VolumeExternallyChanged);
 		break;
 
 	default:
@@ -561,6 +580,21 @@ HRESULT MMFSoundPlayer::Seek(UINT64 seekPosition_100NanoSecondUnits)
 	}
 
 	//Return final code
+	return hr;
+}
+
+HRESULT MMFSoundPlayer::SetVolume(float volumeLevel)
+{
+	//Get volume object
+	CComPtr<IMFSimpleAudioVolume> simpleAudioVolume;
+	HRESULT hr = MFGetService(CurrentMediaSession, MR_POLICY_VOLUME_SERVICE, IID_PPV_ARGS(&simpleAudioVolume));
+	if (FAILED(hr))
+	{
+		return hr;
+	}
+
+	//Try to set volume
+	hr = simpleAudioVolume->SetMasterVolume(volumeLevel);
 	return hr;
 }
 
@@ -875,4 +909,19 @@ UINT64 MMFSoundPlayer::GetCurrentPresentationTime_100NanoSecondUnits()
 		return 0;
 	}
 	return currentPresentationTime;
+}
+
+HRESULT MMFSoundPlayer::GetVolumeLevel(float& currentVolumeLevel)
+{
+	//Get volume object
+	CComPtr<IMFSimpleAudioVolume> simpleAudioVolume;
+	HRESULT hr = MFGetService(CurrentMediaSession, MR_POLICY_VOLUME_SERVICE, IID_PPV_ARGS(&simpleAudioVolume));
+	if (FAILED(hr))
+	{
+		return hr;
+	}
+
+	//Try to retrieve the volume
+	hr = simpleAudioVolume->GetMasterVolume(&currentVolumeLevel);
+	return hr;
 }

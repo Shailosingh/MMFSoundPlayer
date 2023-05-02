@@ -58,6 +58,9 @@ namespace MMFSoundPlayerLib
 		HRESULT CloseMediaSessionAndSource();
 		
 	public:
+		//Public events
+		HANDLE VolumeExternallyChanged;
+
 		//A static public function to create an instance of the object (needed to make object a COM object)
 		static HRESULT CreateInstance(MMFSoundPlayer** outputMMFSoundPlayer);
 
@@ -79,11 +82,13 @@ namespace MMFSoundPlayerLib
 		HRESULT Pause();
 		HRESULT Stop(); 
 		HRESULT Seek(UINT64 seekPosition_100NanoSecondUnits);
+		HRESULT SetVolume(float volumeLevel);
 
 		//Getters
 		PlayerState GetPlayerState();
 		std::wstring GetAudioFilepath();
 		UINT64 GetAudioFileDuration_100NanoSecondUnits();
 		UINT64 GetCurrentPresentationTime_100NanoSecondUnits();
+		HRESULT  GetVolumeLevel(float& currentVolumeLevel);
 	};
 }
